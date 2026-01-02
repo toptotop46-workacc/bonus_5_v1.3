@@ -54,25 +54,51 @@ def run_sonefi() -> None:
     sonefi_run()
 
 
+def run_reverie() -> None:
+    from modules.reverie import run as reverie_run
+
+    reverie_run()
+
+
+def run_redbutton_badge() -> None:
+    from modules.redbutton_badge import run as redbutton_badge_run
+
+    redbutton_badge_run()
+
+
 def build_modules() -> Dict[str, Module]:
     return {
-        "1": Module(key="1", title="RedButton", run=run_redbutton),
+        "1": Module(key="1", title="Uniswap", run=run_uniswap),
         "2": Module(key="2", title="CashOrCrash", run=run_cashorcrash),
-        "3": Module(key="3", title="Uniswap", run=run_uniswap),
-        "4": Module(key="4", title="Mint Season 4", run=run_mint4season),
-        "5": Module(key="5", title="MetaMap NFT", run=run_metamap),
-        "6": Module(key="6", title="SoneFi", run=run_sonefi),
+        "3": Module(key="3", title="SoneFi", run=run_sonefi),
+        "4": Module(key="4", title="RedButton", run=run_redbutton),
+        "5": Module(key="5", title="Mint Season 4", run=run_mint4season),
+        "6": Module(key="6", title="MetaMap NFT (2 points, price: 0.07$)", run=run_metamap),
+        "7": Module(key="7", title="Reverie NFT (2 points, price: free)", run=run_reverie),
+        "8": Module(key="8", title="RedButton + Mint Badge (2 points)", run=run_redbutton_badge),
     }
 
 
 def print_menu(modules: Dict[str, Module]) -> None:
     print("\n==============================")
-    print("Выбор модуля")
+    print("Основные модули")
     print("==============================")
-    for k in sorted(modules.keys()):
-        m = modules[k]
-        print(f"{m.key}. {m.title}")
-    print("0. Выход")
+    # Основные модули: 1-4
+    for k in ["1", "2", "3", "4"]:
+        if k in modules:
+            m = modules[k]
+            print(f"{m.key}. {m.title}")
+    
+    print("\n==============================")
+    print("Дополнительные модули")
+    print("==============================")
+    # Дополнительные модули: 5-8
+    for k in ["5", "6", "7", "8"]:
+        if k in modules:
+            m = modules[k]
+            print(f"{m.key}. {m.title}")
+    
+    print("\n0. Выход")
 
 
 def main() -> None:
@@ -95,12 +121,14 @@ def main() -> None:
     args = parser.parse_args()
 
     key_by_slug: Dict[str, str] = {
-        "redbutton": "1",
+        "uniswap": "1",
         "cashorcrash": "2",
-        "uniswap": "3",
-        "mint4season": "4",
-        "metamap": "5",
-        "sonefi": "6",
+        "sonefi": "3",
+        "redbutton": "4",
+        "mint4season": "5",
+        "metamap": "6",
+        "reverie": "7",
+        "redbutton_badge": "8",
     }
 
     if args.list:

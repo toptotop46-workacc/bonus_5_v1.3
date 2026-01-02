@@ -720,6 +720,187 @@ class SoneFi:
         self.last_request_time: float = 0.0
         self.api_request_delay: float = 2.0
 
+    async def _wait_for_extension_page_ready(
+        self,
+        extension_page: Any,
+        min_wait: float = 3.0,
+        max_wait: float = 10.0,
+        check_interval: float = 0.5
+    ) -> bool:
+        """
+        Ожидает полной загрузки страницы расширения кошелька.
+        
+        Проверяет:
+        - Наличие хотя бы одного элемента button на странице
+        - Наличие текстового контента на странице
+        - Стабильность DOM (элементы не меняются)
+        
+        Args:
+            extension_page: Страница расширения
+            min_wait: Минимальное время ожидания (секунды)
+            max_wait: Максимальное время ожидания (секунды)
+            check_interval: Интервал проверки (секунды)
+        
+        Returns:
+            True если страница готова, False если таймаут
+        """
+        try:
+            # Минимальное ожидание
+            await asyncio.sleep(min_wait)
+            
+            start_time = time.time()
+            last_button_count = 0
+            stable_count = 0
+            required_stable_checks = 2  # Нужно 2 стабильных проверки подряд
+            
+            while (time.time() - start_time) < (max_wait - min_wait):
+                try:
+                    # Проверяем наличие кнопок
+                    buttons = extension_page.locator('button')
+                    button_count = await buttons.count()
+                    
+                    # Проверяем наличие текстового контента
+                    try:
+                        body_text = await extension_page.locator('body').text_content()
+                        has_text = body_text and len(body_text.strip()) > 0
+                    except Exception:
+                        has_text = False
+                    
+                    # Если есть кнопки и текст, проверяем стабильность
+                    if button_count > 0 and has_text:
+                        if button_count == last_button_count:
+                            stable_count += 1
+                            if stable_count >= required_stable_checks:
+                                logger.debug(f"Страница расширения готова (кнопок: {button_count}, стабильность: {stable_count}/{required_stable_checks})")
+                                return True
+                        else:
+                            stable_count = 0
+                            last_button_count = button_count
+                    else:
+                        stable_count = 0
+                    
+                    await asyncio.sleep(check_interval)
+                    
+                except Exception as e:
+                    logger.debug(f"Ошибка при проверке готовности страницы: {e}")
+                    await asyncio.sleep(check_interval)
+                    continue
+            
+            # Если дошли сюда, проверим хотя бы наличие элементов
+            try:
+                buttons = extension_page.locator('button')
+                button_count = await buttons.count()
+                if button_count > 0:
+                    logger.warning(f"Страница расширения частично готова (кнопок: {button_count}), но не достигнута полная стабильность")
+                    return True
+            except Exception:
+                pass
+            
+            logger.warning("Страница расширения не достигла полной готовности за отведённое время")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Ошибка при ожидании готовности страницы расширения: {e}")
+            return False
+
+    async def _find_button_with_retries(
+        self,
+        page: Any,
+        selectors: list[str],
+        button_text: str,
+        max_attempts: int = 5,
+        initial_timeout: float = 5.0,
+        timeout_increment: float = 3.0,
+        delay_between_attempts: float = 1.5
+    ) -> Optional[Any]:
+        """
+        Ищет кнопку с повторными попытками и увеличивающимися таймаутами.
+        
+        Args:
+            page: Страница для поиска
+            selectors: Список CSS селекторов
+            button_text: Текст кнопки для логирования
+            max_attempts: Максимальное количество попыток
+            initial_timeout: Начальный таймаут (секунды)
+            timeout_increment: Увеличение таймаута на каждой попытке
+            delay_between_attempts: Задержка между попытками
+        
+        Returns:
+            Locator кнопки или None
+        """
+        current_timeout = initial_timeout
+        
+        for attempt in range(1, max_attempts + 1):
+            logger.debug(f"Попытка {attempt}/{max_attempts}: поиск кнопки '{button_text}' (timeout: {current_timeout:.1f}s)")
+            
+            for selector in selectors:
+                try:
+                    button = page.locator(selector).first
+                    if await button.is_visible(timeout=int(current_timeout * 1000)):
+                        # Проверяем, что кнопка не disabled
+                        try:
+                            is_disabled = await button.get_attribute('disabled')
+                            if is_disabled:
+                                logger.debug(f"Кнопка '{button_text}' найдена, но disabled, пробуем следующий селектор")
+                                continue
+                        except Exception:
+                            pass
+                        
+                        logger.debug(f"Кнопка '{button_text}' найдена по селектору: {selector}")
+                        return button
+                except Exception as e:
+                    logger.debug(f"Селектор {selector} не сработал: {e}")
+                    continue
+            
+            # Если не нашли на этой попытке, увеличиваем таймаут и ждём
+            if attempt < max_attempts:
+                logger.debug(f"Кнопка '{button_text}' не найдена, ожидание {delay_between_attempts:.1f}s перед следующей попыткой...")
+                await asyncio.sleep(delay_between_attempts)
+                current_timeout += timeout_increment
+        
+        logger.debug(f"Кнопка '{button_text}' не найдена после {max_attempts} попыток")
+        return None
+
+    async def _wait_for_element_stable(
+        self,
+        locator: Any,
+        stability_time: float = 0.5,
+        check_interval: float = 0.1
+    ) -> bool:
+        """
+        Ожидает стабильности элемента (не меняется в течение stability_time).
+        
+        Args:
+            locator: Locator элемента
+            stability_time: Время стабильности (секунды)
+            check_interval: Интервал проверки (секунды)
+        
+        Returns:
+            True если элемент стабилен
+        """
+        try:
+            checks_needed = int(stability_time / check_interval)
+            stable_checks = 0
+            
+            for _ in range(checks_needed * 2):  # Максимум в 2 раза больше проверок
+                try:
+                    is_visible = await locator.is_visible(timeout=500)
+                    if is_visible:
+                        stable_checks += 1
+                        if stable_checks >= checks_needed:
+                            return True
+                    else:
+                        stable_checks = 0
+                except Exception:
+                    stable_checks = 0
+                
+                await asyncio.sleep(check_interval)
+            
+            return stable_checks > 0
+        except Exception as e:
+            logger.debug(f"Ошибка при проверке стабильности элемента: {e}")
+            return True  # Возвращаем True, чтобы не блокировать выполнение
+
     async def _import_wallet_via_cdp(
         self, cdp_endpoint: str, private_key: str, password: str = "Password123"
     ) -> Optional[str]:
@@ -1335,7 +1516,20 @@ class SoneFi:
                     
                     if approve_extension_page:
                         logger.success("Окно расширения кошелька открыто для подтверждения апрува")
-                        await asyncio.sleep(2)
+                        
+                        # Приводим окно на передний план
+                        await approve_extension_page.bring_to_front()
+                        
+                        # Ждём готовности страницы с проверками
+                        logger.info("Ожидание готовности страницы расширения для апрува...")
+                        page_ready = await self._wait_for_extension_page_ready(
+                            approve_extension_page,
+                            min_wait=2.0,  # Апрув может загружаться быстрее
+                            max_wait=8.0
+                        )
+                        
+                        if not page_ready:
+                            logger.warning("Страница расширения для апрува не готова, но продолжаем...")
                         
                         # Нажимаем кнопку "Sign" в окне расширения
                         logger.info("Поиск кнопки 'Sign' в окне расширения кошелька для апрува...")
@@ -1349,27 +1543,33 @@ class SoneFi:
                             'button.primary-action:has-text("Sign")',
                         ]
                         
-                        for selector in approve_sign_selectors:
-                            try:
-                                approve_sign_button = approve_extension_page.locator(selector).first
-                                if await approve_sign_button.is_visible(timeout=5000):
-                                    await approve_sign_button.click()
-                                    logger.success("Кнопка 'Sign' для апрува нажата")
-                                    approve_sign_clicked = True
-                                    await asyncio.sleep(2)
-                                    break
-                            except Exception as e:
-                                logger.debug(f"Не удалось найти кнопку 'Sign' по селектору {selector}: {e}")
-                                continue
+                        # Используем функцию с повторными попытками
+                        approve_sign_button = await self._find_button_with_retries(
+                            approve_extension_page,
+                            selectors=approve_sign_selectors,
+                            button_text="Sign (апрув)",
+                            max_attempts=5,
+                            initial_timeout=5.0,
+                            timeout_increment=3.0,
+                            delay_between_attempts=1.5
+                        )
                         
-                        if not approve_sign_clicked:
-                            logger.warning("Кнопка 'Sign' не найдена, пробуем альтернативные варианты...")
+                        if approve_sign_button:
+                            # Проверяем стабильность перед кликом
+                            await self._wait_for_element_stable(approve_sign_button, stability_time=0.5)
+                            await approve_sign_button.click()
+                            logger.success("Кнопка 'Sign' для апрува нажата")
+                            approve_sign_clicked = True
+                            await asyncio.sleep(2)
+                        else:
+                            # Альтернативный поиск (существующий код)
+                            logger.warning("Кнопка 'Sign' не найдена через основные селекторы, пробуем альтернативные варианты...")
                             try:
                                 all_buttons = approve_extension_page.locator('button')
                                 count = await all_buttons.count()
                                 for i in range(count):
                                     button = all_buttons.nth(i)
-                                    if await button.is_visible(timeout=2000):
+                                    if await button.is_visible(timeout=3000):
                                         button_text = await button.text_content()
                                         if button_text and "Sign" in button_text:
                                             await button.click()
@@ -1378,7 +1578,7 @@ class SoneFi:
                                             await asyncio.sleep(2)
                                             break
                             except Exception as e:
-                                logger.debug(f"Ошибка при поиске кнопки 'Sign': {e}")
+                                logger.debug(f"Ошибка при альтернативном поиске кнопки 'Sign': {e}")
                         
                         # Нажимаем кнопку "Confirm" в окне расширения
                         logger.info("Поиск кнопки 'Confirm' в окне расширения кошелька для апрува...")
@@ -1394,27 +1594,33 @@ class SoneFi:
                             'button.primary-action:has-text("Confirm")',
                         ]
                         
-                        for selector in approve_confirm_selectors:
-                            try:
-                                approve_confirm_button = approve_extension_page.locator(selector).first
-                                if await approve_confirm_button.is_visible(timeout=5000):
-                                    await approve_confirm_button.click()
-                                    logger.success("Кнопка 'Confirm' для апрува нажата")
-                                    approve_confirm_clicked = True
-                                    await asyncio.sleep(2)
-                                    break
-                            except Exception as e:
-                                logger.debug(f"Не удалось найти кнопку 'Confirm' по селектору {selector}: {e}")
-                                continue
+                        # Используем функцию с повторными попытками
+                        approve_confirm_button = await self._find_button_with_retries(
+                            approve_extension_page,
+                            selectors=approve_confirm_selectors,
+                            button_text="Confirm (апрув)",
+                            max_attempts=5,
+                            initial_timeout=5.0,
+                            timeout_increment=3.0,
+                            delay_between_attempts=1.5
+                        )
                         
-                        if not approve_confirm_clicked:
-                            logger.warning("Не удалось найти кнопку 'Confirm', пробуем альтернативные варианты...")
+                        if approve_confirm_button:
+                            # Проверяем стабильность перед кликом
+                            await self._wait_for_element_stable(approve_confirm_button, stability_time=0.5)
+                            await approve_confirm_button.click()
+                            logger.success("Кнопка 'Confirm' для апрува нажата")
+                            approve_confirm_clicked = True
+                            await asyncio.sleep(2)
+                        else:
+                            # Альтернативный поиск
+                            logger.warning("Кнопка 'Confirm' не найдена через основные селекторы, пробуем альтернативные варианты...")
                             try:
                                 all_buttons = approve_extension_page.locator('button')
                                 count = await all_buttons.count()
                                 for i in range(count):
                                     button = all_buttons.nth(i)
-                                    if await button.is_visible(timeout=2000):
+                                    if await button.is_visible(timeout=3000):
                                         button_text = await button.text_content()
                                         if button_text and "Confirm" in button_text:
                                             await button.click()
@@ -1423,7 +1629,7 @@ class SoneFi:
                                             await asyncio.sleep(2)
                                             break
                             except Exception as e:
-                                logger.debug(f"Ошибка при поиске кнопки 'Confirm': {e}")
+                                logger.debug(f"Ошибка при альтернативном поиске кнопки 'Confirm': {e}")
                         
                         if approve_confirm_clicked:
                             logger.success("Апрув USDC.e подтвержден в кошельке")
@@ -1627,7 +1833,20 @@ class SoneFi:
                 
                 if extension_page:
                     logger.success("Окно расширения кошелька открыто для подтверждения транзакции")
-                    await asyncio.sleep(2)  # Даём время на загрузку окна расширения
+                    
+                    # Приводим окно на передний план
+                    await extension_page.bring_to_front()
+                    
+                    # Ждём готовности страницы с проверками
+                    logger.info("Ожидание готовности страницы расширения для подтверждения транзакции...")
+                    page_ready = await self._wait_for_extension_page_ready(
+                        extension_page,
+                        min_wait=4.0,  # Подтверждение транзакции требует больше времени
+                        max_wait=12.0
+                    )
+                    
+                    if not page_ready:
+                        logger.warning("Страница расширения для подтверждения транзакции не готова, но продолжаем...")
                     
                     # 9. Нажимаем кнопку "Sign" в окне расширения
                     logger.info("Поиск кнопки 'Sign' в окне расширения кошелька...")
@@ -1642,28 +1861,33 @@ class SoneFi:
                         'button.button:has-text("Sign")',
                     ]
                     
-                    for selector in sign_button_selectors:
-                        try:
-                            sign_button = extension_page.locator(selector).first
-                            if await sign_button.is_visible(timeout=5000):
-                                await sign_button.click()
-                                logger.success("Кнопка 'Sign' нажата")
-                                sign_button_clicked = True
-                                await asyncio.sleep(2)
-                                break
-                        except Exception as e:
-                            logger.debug(f"Не удалось найти кнопку 'Sign' по селектору {selector}: {e}")
-                            continue
+                    # Используем функцию с повторными попытками
+                    sign_button = await self._find_button_with_retries(
+                        extension_page,
+                        selectors=sign_button_selectors,
+                        button_text="Sign (подтверждение транзакции)",
+                        max_attempts=5,
+                        initial_timeout=8.0,  # Увеличенный начальный таймаут
+                        timeout_increment=3.0,
+                        delay_between_attempts=1.5
+                    )
                     
-                    if not sign_button_clicked:
-                        logger.warning("Не удалось найти кнопку 'Sign', пробуем альтернативные варианты...")
-                        # Пробуем найти любую кнопку с текстом, содержащим "Sign"
+                    if sign_button:
+                        # Проверяем стабильность перед кликом
+                        await self._wait_for_element_stable(sign_button, stability_time=0.5)
+                        await sign_button.click()
+                        logger.success("Кнопка 'Sign' нажата")
+                        sign_button_clicked = True
+                        await asyncio.sleep(2)
+                    else:
+                        # Альтернативный поиск
+                        logger.warning("Кнопка 'Sign' не найдена через основные селекторы, пробуем альтернативные варианты...")
                         try:
                             all_buttons = extension_page.locator('button')
                             count = await all_buttons.count()
                             for i in range(count):
                                 button = all_buttons.nth(i)
-                                if await button.is_visible(timeout=2000):
+                                if await button.is_visible(timeout=3000):
                                     button_text = await button.text_content()
                                     if button_text and "Sign" in button_text:
                                         await button.click()
@@ -1672,7 +1896,7 @@ class SoneFi:
                                         await asyncio.sleep(2)
                                         break
                         except Exception as e:
-                            logger.debug(f"Ошибка при поиске кнопки 'Sign': {e}")
+                            logger.debug(f"Ошибка при альтернативном поиске кнопки 'Sign': {e}")
                     
                     if not sign_button_clicked:
                         logger.warning("Кнопка 'Sign' не найдена, возможно уже нажата или не требуется")
@@ -1692,28 +1916,33 @@ class SoneFi:
                         'button.button:has-text("Confirm")',
                     ]
                     
-                    for selector in confirm_button_selectors:
-                        try:
-                            confirm_button = extension_page.locator(selector).first
-                            if await confirm_button.is_visible(timeout=5000):
-                                await confirm_button.click()
-                                logger.success("Кнопка 'Confirm' нажата")
-                                confirm_button_clicked = True
-                                await asyncio.sleep(2)
-                                break
-                        except Exception as e:
-                            logger.debug(f"Не удалось найти кнопку 'Confirm' по селектору {selector}: {e}")
-                            continue
+                    # Используем функцию с повторными попытками
+                    confirm_button = await self._find_button_with_retries(
+                        extension_page,
+                        selectors=confirm_button_selectors,
+                        button_text="Confirm (подтверждение транзакции)",
+                        max_attempts=5,
+                        initial_timeout=8.0,  # Увеличенный начальный таймаут
+                        timeout_increment=3.0,
+                        delay_between_attempts=1.5
+                    )
                     
-                    if not confirm_button_clicked:
-                        logger.warning("Не удалось найти кнопку 'Confirm', пробуем альтернативные варианты...")
-                        # Пробуем найти любую кнопку с текстом, содержащим "Confirm"
+                    if confirm_button:
+                        # Проверяем стабильность перед кликом
+                        await self._wait_for_element_stable(confirm_button, stability_time=0.5)
+                        await confirm_button.click()
+                        logger.success("Кнопка 'Confirm' нажата")
+                        confirm_button_clicked = True
+                        await asyncio.sleep(2)
+                    else:
+                        # Альтернативный поиск
+                        logger.warning("Кнопка 'Confirm' не найдена через основные селекторы, пробуем альтернативные варианты...")
                         try:
                             all_buttons = extension_page.locator('button')
                             count = await all_buttons.count()
                             for i in range(count):
                                 button = all_buttons.nth(i)
-                                if await button.is_visible(timeout=2000):
+                                if await button.is_visible(timeout=3000):
                                     button_text = await button.text_content()
                                     if button_text and "Confirm" in button_text:
                                         await button.click()
@@ -1722,7 +1951,7 @@ class SoneFi:
                                         await asyncio.sleep(2)
                                         break
                         except Exception as e:
-                            logger.debug(f"Ошибка при поиске кнопки 'Confirm': {e}")
+                            logger.debug(f"Ошибка при альтернативном поиске кнопки 'Confirm': {e}")
                     
                     if not confirm_button_clicked:
                         logger.warning("Кнопка 'Confirm' не найдена, возможно транзакция уже подтверждена")
@@ -2015,7 +2244,20 @@ class SoneFi:
                                     
                                     if close_extension_page:
                                         logger.success("Окно расширения кошелька открыто для подтверждения закрытия")
-                                        await asyncio.sleep(2)
+                                        
+                                        # Приводим окно на передний план
+                                        await close_extension_page.bring_to_front()
+                                        
+                                        # Ждём готовности страницы с проверками
+                                        logger.info("Ожидание готовности страницы расширения для закрытия позиции...")
+                                        page_ready = await self._wait_for_extension_page_ready(
+                                            close_extension_page,
+                                            min_wait=4.0,  # Закрытие позиции требует больше времени
+                                            max_wait=12.0
+                                        )
+                                        
+                                        if not page_ready:
+                                            logger.warning("Страница расширения для закрытия позиции не готова, но продолжаем...")
                                         
                                         # 15. Нажимаем кнопку "Sign" в окне расширения
                                         logger.info("Поиск кнопки 'Sign' в окне расширения кошелька...")
@@ -2029,27 +2271,33 @@ class SoneFi:
                                             'button.primary-action:has-text("Sign")',
                                         ]
                                         
-                                        for selector in close_sign_button_selectors:
-                                            try:
-                                                close_sign_button = close_extension_page.locator(selector).first
-                                                if await close_sign_button.is_visible(timeout=5000):
-                                                    await close_sign_button.click()
-                                                    logger.success("Кнопка 'Sign' нажата")
-                                                    close_sign_button_clicked = True
-                                                    await asyncio.sleep(2)
-                                                    break
-                                            except Exception as e:
-                                                logger.debug(f"Не удалось найти кнопку 'Sign' по селектору {selector}: {e}")
-                                                continue
+                                        # Используем функцию с повторными попытками
+                                        close_sign_button = await self._find_button_with_retries(
+                                            close_extension_page,
+                                            selectors=close_sign_button_selectors,
+                                            button_text="Sign (закрытие позиции)",
+                                            max_attempts=5,
+                                            initial_timeout=8.0,  # Увеличенный начальный таймаут
+                                            timeout_increment=3.0,
+                                            delay_between_attempts=1.5
+                                        )
                                         
-                                        if not close_sign_button_clicked:
-                                            logger.warning("Кнопка 'Sign' не найдена, пробуем альтернативные варианты...")
+                                        if close_sign_button:
+                                            # Проверяем стабильность перед кликом
+                                            await self._wait_for_element_stable(close_sign_button, stability_time=0.5)
+                                            await close_sign_button.click()
+                                            logger.success("Кнопка 'Sign' нажата")
+                                            close_sign_button_clicked = True
+                                            await asyncio.sleep(2)
+                                        else:
+                                            # Альтернативный поиск
+                                            logger.warning("Кнопка 'Sign' не найдена через основные селекторы, пробуем альтернативные варианты...")
                                             try:
                                                 all_buttons = close_extension_page.locator('button')
                                                 count = await all_buttons.count()
                                                 for i in range(count):
                                                     button = all_buttons.nth(i)
-                                                    if await button.is_visible(timeout=2000):
+                                                    if await button.is_visible(timeout=3000):
                                                         button_text = await button.text_content()
                                                         if button_text and "Sign" in button_text:
                                                             await button.click()
@@ -2058,7 +2306,7 @@ class SoneFi:
                                                             await asyncio.sleep(2)
                                                             break
                                             except Exception as e:
-                                                logger.debug(f"Ошибка при поиске кнопки 'Sign': {e}")
+                                                logger.debug(f"Ошибка при альтернативном поиске кнопки 'Sign': {e}")
                                         
                                         # 16. Нажимаем кнопку "Confirm" в окне расширения
                                         logger.info("Поиск кнопки 'Confirm' в окне расширения кошелька...")
@@ -2074,27 +2322,33 @@ class SoneFi:
                                             'button.primary-action:has-text("Confirm")',
                                         ]
                                         
-                                        for selector in close_confirm_button_selectors:
-                                            try:
-                                                close_confirm_button = close_extension_page.locator(selector).first
-                                                if await close_confirm_button.is_visible(timeout=5000):
-                                                    await close_confirm_button.click()
-                                                    logger.success("Кнопка 'Confirm' нажата")
-                                                    close_confirm_button_clicked = True
-                                                    await asyncio.sleep(2)
-                                                    break
-                                            except Exception as e:
-                                                logger.debug(f"Не удалось найти кнопку 'Confirm' по селектору {selector}: {e}")
-                                                continue
+                                        # Используем функцию с повторными попытками
+                                        close_confirm_button = await self._find_button_with_retries(
+                                            close_extension_page,
+                                            selectors=close_confirm_button_selectors,
+                                            button_text="Confirm (закрытие позиции)",
+                                            max_attempts=5,
+                                            initial_timeout=8.0,  # Увеличенный начальный таймаут
+                                            timeout_increment=3.0,
+                                            delay_between_attempts=1.5
+                                        )
                                         
-                                        if not close_confirm_button_clicked:
-                                            logger.warning("Не удалось найти кнопку 'Confirm', пробуем альтернативные варианты...")
+                                        if close_confirm_button:
+                                            # Проверяем стабильность перед кликом
+                                            await self._wait_for_element_stable(close_confirm_button, stability_time=0.5)
+                                            await close_confirm_button.click()
+                                            logger.success("Кнопка 'Confirm' нажата")
+                                            close_confirm_button_clicked = True
+                                            await asyncio.sleep(2)
+                                        else:
+                                            # Альтернативный поиск
+                                            logger.warning("Кнопка 'Confirm' не найдена через основные селекторы, пробуем альтернативные варианты...")
                                             try:
                                                 all_buttons = close_extension_page.locator('button')
                                                 count = await all_buttons.count()
                                                 for i in range(count):
                                                     button = all_buttons.nth(i)
-                                                    if await button.is_visible(timeout=2000):
+                                                    if await button.is_visible(timeout=3000):
                                                         button_text = await button.text_content()
                                                         if button_text and "Confirm" in button_text:
                                                             await button.click()
@@ -2103,7 +2357,7 @@ class SoneFi:
                                                             await asyncio.sleep(2)
                                                             break
                                             except Exception as e:
-                                                logger.debug(f"Ошибка при поиске кнопки 'Confirm': {e}")
+                                                logger.debug(f"Ошибка при альтернативном поиске кнопки 'Confirm': {e}")
                                         
                                         if close_confirm_button_clicked:
                                             logger.success("Закрытие позиции подтверждено в кошельке")

@@ -3,3 +3,4 @@ pygetwindow>=0.0.9
 web3>=6.0.0
 loguru>=0.7.2
 requests>=2.32.3
+eth-account>=0.8.0
