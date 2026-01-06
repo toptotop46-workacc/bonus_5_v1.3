@@ -66,6 +66,12 @@ def run_redbutton_badge() -> None:
     redbutton_badge_run()
 
 
+def run_harkan() -> None:
+    from modules.harkan import run as harkan_run
+
+    harkan_run()
+
+
 def build_modules() -> Dict[str, Module]:
     return {
         "1": Module(key="1", title="Uniswap", run=run_uniswap),
@@ -76,6 +82,7 @@ def build_modules() -> Dict[str, Module]:
         "6": Module(key="6", title="MetaMap NFT (2 points, price: 0.07$)", run=run_metamap),
         "7": Module(key="7", title="Reverie NFT (2 points, price: free)", run=run_reverie),
         "8": Module(key="8", title="RedButton + Mint Badge (2 points)", run=run_redbutton_badge),
+        "9": Module(key="9", title="Harkan NFT Claim (2 points, price: free)", run=run_harkan),
     }
 
 
@@ -92,8 +99,8 @@ def print_menu(modules: Dict[str, Module]) -> None:
     print("\n==============================")
     print("Дополнительные модули")
     print("==============================")
-    # Дополнительные модули: 5-8
-    for k in ["5", "6", "7", "8"]:
+    # Дополнительные модули: 5-9
+    for k in ["5", "6", "7", "8", "9"]:
         if k in modules:
             m = modules[k]
             print(f"{m.key}. {m.title}")
@@ -129,6 +136,7 @@ def main() -> None:
         "metamap": "6",
         "reverie": "7",
         "redbutton_badge": "8",
+        "harkan": "9",
     }
 
     if args.list:

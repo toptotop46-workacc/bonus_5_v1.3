@@ -290,6 +290,255 @@ def get_module_stats(module: str, db_path: Path = QUESTS_DB_PATH) -> dict:
         return {"module": module, "total_completed": 0}
 
 
+# ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С HARKAN ACCOUNTS ====================
+
+
+def init_harkan_accounts_table(db_path: Path = QUESTS_DB_PATH) -> None:
+    """
+    Создает таблицу harkan_accounts для хранения данных аккаунтов Harkan.
+
+    Args:
+        db_path: Путь к файлу базы данных
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        # Создаем таблицу harkan_accounts
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harkan_accounts (
+                wallet_address TEXT NOT NULL PRIMARY KEY,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                ip_address TEXT,
+                access_token TEXT,
+                refresh_token TEXT,
+                claim_requested BOOLEAN DEFAULT 0,
+                claim_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # Создаем индексы
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_harkan_accounts_username 
+            ON harkan_accounts(username)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_harkan_accounts_claim_requested 
+            ON harkan_accounts(claim_requested)
+            """
+        )
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Таблица harkan_accounts инициализирована: {db_path}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации таблицы harkan_accounts: {e}")
+        raise
+
+
+def get_harkan_account(
+    wallet_address: str, db_path: Path = QUESTS_DB_PATH
+) -> Optional[dict]:
+    """
+    Получает данные аккаунта Harkan из БД.
+
+    Args:
+        wallet_address: Адрес кошелька (checksum format)
+        db_path: Путь к файлу базы данных
+
+    Returns:
+        Словарь с данными аккаунта или None если не найден
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT wallet_address, username, password, user_id, ip_address,
+                   access_token, refresh_token, claim_requested, claim_id,
+                   created_at, updated_at
+            FROM harkan_accounts
+            WHERE wallet_address = ?
+            """,
+            (wallet_address,),
+        )
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return {
+                "wallet_address": row["wallet_address"],
+                "username": row["username"],
+                "password": row["password"],
+                "user_id": row["user_id"],
+                "ip_address": row["ip_address"],
+                "access_token": row["access_token"],
+                "refresh_token": row["refresh_token"],
+                "claim_requested": bool(row["claim_requested"]),
+                "claim_id": row["claim_id"],
+                "created_at": (
+                    datetime.fromisoformat(row["created_at"])
+                    if row["created_at"]
+                    else None
+                ),
+                "updated_at": (
+                    datetime.fromisoformat(row["updated_at"])
+                    if row["updated_at"]
+                    else None
+                ),
+            }
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"Ошибка при получении аккаунта Harkan для {wallet_address}: {e}")
+        return None
+
+
+def save_harkan_account(
+    wallet_address: str,
+    username: str,
+    password: str,
+    user_id: str,
+    ip_address: Optional[str] = None,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+    db_path: Path = QUESTS_DB_PATH,
+) -> None:
+    """
+    Сохраняет данные аккаунта Harkan в БД.
+
+    Args:
+        wallet_address: Адрес кошелька (checksum format)
+        username: Имя пользователя
+        password: Пароль (в открытом виде)
+        user_id: UUID пользователя
+        ip_address: IP адрес прокси
+        access_token: JWT токен доступа (опционально)
+        refresh_token: Refresh токен (опционально)
+        db_path: Путь к файлу базы данных
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        now_utc = datetime.now(timezone.utc).isoformat()
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO harkan_accounts 
+            (wallet_address, username, password, user_id, ip_address,
+             access_token, refresh_token, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                wallet_address,
+                username,
+                password,
+                user_id,
+                ip_address,
+                access_token,
+                refresh_token,
+                now_utc,
+                now_utc,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Аккаунт Harkan для {wallet_address} сохранен в БД")
+
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении аккаунта Harkan в БД: {e}")
+
+
+def update_harkan_claim(
+    wallet_address: str, claim_id: str, db_path: Path = QUESTS_DB_PATH
+) -> None:
+    """
+    Обновляет информацию о поданной заявке на клайм NFT.
+
+    Args:
+        wallet_address: Адрес кошелька (checksum format)
+        claim_id: ID заявки из ответа API
+        db_path: Путь к файлу базы данных
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        now_utc = datetime.now(timezone.utc).isoformat()
+
+        cursor.execute(
+            """
+            UPDATE harkan_accounts
+            SET claim_requested = 1, claim_id = ?, updated_at = ?
+            WHERE wallet_address = ?
+            """,
+            (claim_id, now_utc, wallet_address),
+        )
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Заявка на клайм для {wallet_address} обновлена в БД")
+
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении заявки Harkan в БД: {e}")
+
+
+def is_harkan_claim_requested(
+    wallet_address: str, db_path: Path = QUESTS_DB_PATH
+) -> bool:
+    """
+    Проверяет, подана ли уже заявка на клайм NFT для кошелька.
+
+    Args:
+        wallet_address: Адрес кошелька (checksum format)
+        db_path: Путь к файлу базы данных
+
+    Returns:
+        True если заявка уже подана, False если нет
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT claim_requested
+            FROM harkan_accounts
+            WHERE wallet_address = ?
+            """,
+            (wallet_address,),
+        )
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return bool(row[0])
+
+        return False
+
+    except Exception as e:
+        logger.warning(f"Ошибка при проверке заявки Harkan для {wallet_address}: {e}")
+        return False
+
+
 if __name__ == "__main__":
     # Тестирование функций
     logger.remove()
