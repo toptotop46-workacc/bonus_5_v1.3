@@ -677,7 +677,7 @@ def should_check_wallet(
     - Если статус 'minted' → не проверяем (return False) - уже сминтили
     - Если статус 'not_eligible' → не проверяем (return False) - не хватает поинтов
     - Если статус 'period_ended' → не проверяем (return False) - период закончился
-    - Если статус 'waiting' → не проверяем (return False) - период еще не наступил (не изменится сам)
+    - Если статус 'waiting' → проверяем текущую дату: если период наступил, проверяем (return True), иначе пропускаем (return False)
     - Если статус 'eligible' → проверяем (return True) - нужно минтить
     - Если статус 'no_data' или 'error' → проверяем (return True) - нужна повторная проверка
     - Если записи нет → проверяем (return True)
@@ -699,8 +699,41 @@ def should_check_wallet(
 
     status = wallet_data["status"]
 
+    # Для статуса 'waiting' проверяем текущую дату - возможно период уже наступил
+    if status == "waiting":
+        total_score = wallet_data.get("total_score", 0)
+        if total_score > 0:
+            # Проверяем текущий статус на основе даты
+            eligibility_status = _determine_season4_eligibility_status(total_score)
+            current_status = eligibility_status["status"]
+            
+            # Если период наступил и статус изменился на 'eligible', нужно проверить
+            if current_status == "eligible":
+                logger.info(
+                    f"Кошелек {address} был в статусе 'waiting', но период клайма наступил. "
+                    f"Требуется повторная проверка."
+                )
+                return True, wallet_data
+            # Если период закончился, обновляем статус в БД и не проверяем
+            elif current_status == "period_ended":
+                logger.info(
+                    f"Кошелек {address} был в статусе 'waiting', но период клайма закончился. "
+                    f"Обновляем статус в БД."
+                )
+                save_wallet_status(
+                    address,
+                    status="period_ended",
+                    total_score=total_score,
+                    claiming_period=eligibility_status.get("claimingPeriod"),
+                    db_path=db_path,
+                )
+                return False, wallet_data
+        
+        # Если total_score = 0 или период еще не наступил, пропускаем
+        return False, wallet_data
+
     # Финальные статусы, которые не требуют повторной проверки
-    if status in ("minted", "not_eligible", "period_ended", "waiting"):
+    if status in ("minted", "not_eligible", "period_ended"):
         return False, wallet_data
 
     # Для остальных статусов ('eligible', 'no_data', 'error') - проверяем
